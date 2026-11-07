@@ -84,7 +84,7 @@ struct DetailPane: View {
             }
             PrimaryButton(
                 title: cleanTitle,
-                disabled: viewModel.totalSelected == 0 || viewModel.phase == .cleaning || viewModel.phase == .scanning
+                disabled: viewModel.phase == .cleaned || viewModel.totalSelected == 0 || viewModel.phase == .cleaning || viewModel.phase == .scanning
             ) {
                 showingCleanDialog = true
             }
@@ -126,7 +126,9 @@ struct DetailPane: View {
     }
 
     private var cleanTitle: String {
-        viewModel.totalSelected > 0
+        if viewModel.phase == .cleaned { return "Cleaned" }
+        if viewModel.phase == .cleaning { return "Cleaning…" }
+        return viewModel.totalSelected > 0
             ? "Clean \(ByteCountFormatter.string(fromByteCount: viewModel.totalSelected, countStyle: .file))"
             : "Clean"
     }
@@ -370,12 +372,15 @@ private struct ItemRow: View {
                         .lineLimit(1)
                 }
                 if let error = item.error {
-                    HStack(spacing: 4) {
+                    HStack(alignment: .top, spacing: 4) {
                         PixelFailed(cell: 1)
                             .frame(width: 5, height: 5)
+                            .padding(.top, 2)
                         Text(error)
                             .font(AppType.caption)
                             .foregroundStyle(Tok.statusBad)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -389,7 +394,8 @@ private struct ItemRow: View {
                 .foregroundStyle(Tok.text2)
                 .frame(width: 72, alignment: .trailing)
         }
-        .frame(height: 44)
+        .frame(minHeight: item.error != nil ? 60 : 44)
+        .padding(.vertical, item.error != nil ? 6 : 0)
         .contentShape(Rectangle())
         .background(hovering ? Tok.control : .clear, in: RoundedRectangle(cornerRadius: 8))
         .motionPress(pressed: pressed, reduceMotion: reduceMotion)

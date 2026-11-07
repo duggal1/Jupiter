@@ -45,6 +45,9 @@ struct SidebarPane: View {
     }
 
     private var reclaimTitle: String {
+        if viewModel.phase == .cleaned, let freed = viewModel.lastFreed {
+            return ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)
+        }
         if viewModel.totalSelected > 0 {
             return ByteCountFormatter.string(fromByteCount: viewModel.totalSelected, countStyle: .file)
         }

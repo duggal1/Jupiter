@@ -77,10 +77,29 @@ enum Cleaner {
                 continue
             }
             do {
-                _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                // Already gone (moved/emptied between scan and clean) counts as freed.
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    outcome.freed += item.size
+                    item.isDeleted = true
+                    await onProgress?(outcome.freed, item)
+                    continue
+                }
+                // Files already in ~/.Trash can't be re-trashed — remove permanently.
+                if url.path.contains("/.Trash/") {
+                    try FileManager.default.removeItem(at: url)
+                } else {
+                    _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                }
                 outcome.freed += item.size
                 item.isDeleted = true
             } catch {
+                // Vanished mid-clean (other cleaner, Trash auto-empty) is freed, not failed.
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    outcome.freed += item.size
+                    item.isDeleted = true
+                    await onProgress?(outcome.freed, item)
+                    continue
+                }
                 outcome.failed += 1
                 item.error = error.localizedDescription
                 outcome.failureMessages.append("\(item.name): \(error.localizedDescription)")

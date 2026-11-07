@@ -1,0 +1,39 @@
+name: macos-dmg
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Release (Apple Silicon, ad-hoc signed — free, no $99)
+        run: |
+          xcodebuild -project Purge.xcodeproj -scheme Purge -configuration Release clean build
+          APP=$(find ~/Library/Developer/Xcode/DerivedData/Purge-*/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
+          echo "APP=$APP"
+          codesign --force --deep --sign - --options runtime --timestamp=none "$APP"
+          codesign -dvv "$APP"
+          mkdir -p dist
+          cp -R "$APP" dist/Jupiter.app
+
+      - name: Make DMG
+        run: |
+          hdiutil create -volname "Jupiter" -srcfolder dist/Jupiter.app -ov -format UDZO dist/Jupiter.dmg
+          ls -lh dist/Jupiter.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jupiter-dmg
+          path: dist/Jupiter.dmg
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Jupiter.dmg
