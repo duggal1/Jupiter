@@ -57,14 +57,15 @@ h1 span { display: block; color: var(--text2); }
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
+  height: 40px;
   padding: 0 20px;
   background: linear-gradient(180deg, #001651 0%, #0040F0 100%);
   box-shadow: inset 0 -1.5px 2px 0 #638DFF, inset 0 0 10px 0 #0043FB, inset 0 0 8px 0 #0043FB;
   border-radius: 8px;
   color: #fff;
   font-size: 14px;
-  font-weight: 400;
+  font-weight: 500;
+  letter-spacing: normal;
   text-decoration: none;
   cursor: pointer;
   transition: filter 200ms ease-in-out;
@@ -72,7 +73,7 @@ h1 span { display: block; color: var(--text2); }
 .download img { width: 16px; height: 16px; }
 .download:hover { filter: brightness(1.12); }
 .download:active { filter: brightness(0.96); }
-.meta { font-size: 12px; color: var(--text2); }
+.meta { font-size: 12px; font-weight: 500; letter-spacing: normal; color: var(--text2); }
 
 /* disk map */
 .mapwrap { margin-top: 64px; }
