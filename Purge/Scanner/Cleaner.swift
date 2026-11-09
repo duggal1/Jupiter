@@ -16,23 +16,10 @@ enum Cleaner {
     /// Lightweight RAM flush — purges the file page cache with `purge`.
     /// Needs admin (macOS auth dialog); leaves running apps alone.
     /// Best-effort: throws if the user cancels the prompt.
+    /// Implementation lives in MemoryLab so the ladder and auto-clean
+    /// share one purge path and one honest before/after measurement.
     static func flushRAM() async throws {
-        try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            // osascript prompts once for admin via the system dialog.
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", "do shell script \"purge\" with administrator privileges"]
-            let err = Pipe()
-            process.standardError = err
-            process.standardOutput = Pipe()
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                let data = err.fileHandleForReading.readDataToEndOfFile()
-                let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "purge failed"
-                throw NSError(domain: "jupiter.Cleaner", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
-            }
-        }.value
+        try await MemoryLab.purgeCache()
     }
 
     static func clean(items: [JunkItem]) async -> Outcome {

@@ -6,6 +6,7 @@ import SwiftUI
 struct DetailPane: View {
     @Bindable var viewModel: ScanViewModel
     @Binding var showingCleanDialog: Bool
+    @Binding var pane: AppPane
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
 
@@ -75,6 +76,12 @@ struct DetailPane: View {
                 .lineLimit(1)
             QuietButton(title: scanButtonTitle) {
                 viewModel.scan()
+            }
+            SecondaryButton(
+                title: "Memory",
+                disabled: viewModel.phase == .cleaning || viewModel.phase == .scanning
+            ) {
+                pane = .memory
             }
             SecondaryButton(
                 title: "Auto-clean",

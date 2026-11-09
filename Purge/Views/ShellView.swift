@@ -5,6 +5,7 @@ import SwiftUI
 struct ShellView: View {
     @State private var viewModel = ScanViewModel()
     @State private var watchdogViewModel = WatchdogViewModel()
+    @State private var memoryViewModel = MemoryViewModel()
     @State private var showingCleanDialog = false
     @State private var pane: AppPane = .clean
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -18,8 +19,10 @@ struct ShellView: View {
                 Group {
                     if pane == .watchdog {
                         WatchdogPane(viewModel: watchdogViewModel)
+                    } else if pane == .memory {
+                        MemoryPane(viewModel: memoryViewModel, pane: $pane)
                     } else {
-                        DetailPane(viewModel: viewModel, showingCleanDialog: $showingCleanDialog)
+                        DetailPane(viewModel: viewModel, showingCleanDialog: $showingCleanDialog, pane: $pane)
                     }
                 }
                 .transition(reduceMotion ? .identity : .opacity)
@@ -38,10 +41,13 @@ struct ShellView: View {
     }
 }
 
-/// Top-level pane routing: Clean (scan/detail) vs Watchdog settings.
+/// Top-level pane routing: Clean (scan/detail) vs Watchdog vs Memory.
+/// Watchdog lives in the sidebar; Memory opens from the Detail page bar —
+/// intentionally not a sidebar row.
 enum AppPane: Hashable {
     case clean
     case watchdog
+    case memory
 }
 
 /// System blur behind the sidebar (the blur exception in §1).
