@@ -2,38 +2,67 @@ name: macos-dmg
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    paths:
+      - ".github/workflows/macos-dmg.yml"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Release (Apple Silicon, ad-hoc signed — free, no $99)
+      - name: Build universal macOS Release
+        shell: bash
         run: |
-          xcodebuild -project Purge.xcodeproj -scheme Purge -configuration Release clean build
-          APP=$(find ~/Library/Developer/Xcode/DerivedData/Purge-*/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
-          echo "APP=$APP"
-          codesign --force --deep --sign - --options runtime --timestamp=none "$APP"
-          codesign -dvv "$APP"
-          mkdir -p dist
-          cp -R "$APP" dist/Jupiter.app
+          set -euo pipefail
+          xcodebuild -project Purge.xcodeproj -scheme Purge -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/JupiterDerived" \
+            CODE_SIGNING_ALLOWED=NO 'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO clean build
+          APP="$RUNNER_TEMP/JupiterDerived/Build/Products/Release/Jupiter.app"
+          test -f "$APP/Contents/MacOS/Jupiter"
+          lipo "$APP/Contents/MacOS/Jupiter" -verify_arch arm64 x86_64
+          codesign --force --deep --sign - --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
-      - name: Make DMG
-        run: |
-          hdiutil create -volname "Jupiter" -srcfolder dist/Jupiter.app -ov -format UDZO dist/Jupiter.dmg
-          ls -lh dist/Jupiter.dmg
+          mkdir -p release
+          hdiutil create -volname "Jupiter" -srcfolder "$APP" -ov -format UDZO release/Jupiter.dmg
+          hdiutil verify release/Jupiter.dmg
+          shasum -a 256 release/Jupiter.dmg
+          ls -lh release/Jupiter.dmg
 
-      - name: Upload DMG
+      - name: Upload DMG build artifact
         uses: actions/upload-artifact@v4
         with:
           name: Jupiter-dmg
-          path: dist/Jupiter.dmg
+          path: release/Jupiter.dmg
+          if-no-files-found: error
 
-      - name: Publish Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish initial release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v1.0.0 > /dev/null 2>&1; then
+            echo "Release v1.0.0 already exists; leaving it unchanged."
+          else
+            gh release create v1.0.0 release/Jupiter.dmg \
+              --target "$GITHUB_SHA" \
+              --title "Jupiter v1.0.0" \
+              --notes "First public macOS release. Universal Apple Silicon and Intel app. Ad-hoc signed, not notarized."
+          fi
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Jupiter.dmg
+          files: release/Jupiter.dmg
+          generate_release_notes: true
