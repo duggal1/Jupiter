@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Memory page: pressure readout + polite ladder. Same tokens as
-/// WatchdogPane so the two settings pages feel like one family.
+/// Memory page: one circular pixel readout, one ladder line, one clean action.
+/// No paragraphs. Numbers replace sentences — backend unchanged.
 struct MemoryPane: View {
     @Bindable var viewModel: MemoryViewModel
     @Binding var pane: AppPane
@@ -10,65 +10,24 @@ struct MemoryPane: View {
     var body: some View {
         VStack(spacing: 0) {
             pageBar
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Frees RAM without quitting anything. The staircase only returns reclaimable pages — active app memory is never touched.")
-                        .font(AppType.body)
-                        .foregroundStyle(Tok.text2)
-                        .padding(.horizontal, 32)
-                        .padding(.top, 8)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        pressureCard
-                        numbersCard
-                        ladderCard
-                        toggleCard
-                        if let message = viewModel.message {
-                            Text(message)
-                                .font(AppType.caption)
-                                .foregroundStyle(Tok.text2)
-                        }
-                        if let result = viewModel.result {
-                            HStack(spacing: 12) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Available")
-                                        .font(AppType.caption)
-                                        .foregroundStyle(Tok.text2)
-                                    Text("\(MemoryLab.fmt(result.before.availableBytes)) → \(MemoryLab.fmt(result.after.availableBytes))")
-                                        .font(AppType.body)
-                                        .monospacedDigit()
-                                        .foregroundStyle(Tok.text)
-                                }
-                                Spacer()
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text("Swap used")
-                                        .font(AppType.caption)
-                                        .foregroundStyle(Tok.text2)
-                                    Text("\(MemoryLab.fmt(result.after.swapUsedBytes)) (\(MemoryLab.signedFmt(result.swapDeltaBytes)))")
-                                        .font(AppType.body)
-                                        .monospacedDigit()
-                                        .foregroundStyle(Tok.text)
-                                }
-                                Spacer()
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text("Purged")
-                                        .font(AppType.caption)
-                                        .foregroundStyle(Tok.text2)
-                                    Text(MemoryLab.fmt(result.purgedBytes))
-                                        .font(AppType.body)
-                                        .monospacedDigit()
-                                        .foregroundStyle(Tok.text)
-                                }
-                            }
-                            .padding(12)
-                            .background(Tok.control.clipShape(RoundedRectangle(cornerRadius: 12)))
-                        }
-                    }
-                    .padding(.horizontal, 32)
-                    .padding(.top, 8)
+            if let snapshot = viewModel.snapshot {
+                VStack(spacing: 20) {
+                    heroRing(snapshot: snapshot)
+                    ladderRow
+                    statsRow(snapshot: snapshot)
+                    purgeRow
                 }
-                .padding(.bottom, 32)
+                .padding(.horizontal, 32)
+                .padding(.top, 24)
+            } else {
+                VStack(spacing: 12) {
+                    Spacer()
+                    WaitCells()
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tok.bg)
@@ -76,17 +35,26 @@ struct MemoryPane: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: viewModel.phase)
     }
 
+    // MARK: - Page bar (52pt, like DetailPane)
+
     private var pageBar: some View {
         HStack(alignment: .center, spacing: 12) {
-            Text("Memory")
-                .font(AppType.pageTitle)
-                .tracking(-1.4)
-                .foregroundStyle(Tok.text)
+            HStack(spacing: 8) {
+                Text("Memory")
+                    .font(AppType.pageTitle)
+                    .tracking(-1.4)
+                    .foregroundStyle(Tok.text)
+                PixelStop(cell: 1.5)
+                    .frame(width: 7.5, height: 7.5)
+                    .offset(y: 8)
+            }
             Spacer()
-            Text(viewModel.statusLine)
-                .font(AppType.caption)
-                .foregroundStyle(Tok.text2)
-                .lineLimit(1)
+            if let snapshot = viewModel.snapshot {
+                Circle()
+                    .fill(pressureColor(snapshot.pressure))
+                    .frame(width: 6, height: 6)
+                    .accessibilityLabel(snapshot.pressure.title)
+            }
             QuietButton(title: "Back") { pane = .clean }
             QuietButton(title: "Refresh", disabled: viewModel.isWorking) {
                 Task { await viewModel.refresh() }
@@ -100,119 +68,190 @@ struct MemoryPane: View {
         .padding(.horizontal, 32)
     }
 
-    private var pressureCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Pressure")
-                    .font(AppType.label)
+    // MARK: - Circular pixel hero
+
+    private func heroRing(snapshot: MemoryLab.Snapshot) -> some View {
+        ZStack {
+            PixelRing(fraction: snapshot.availableRatio, pressure: snapshot.pressure)
+                .frame(width: 220, height: 220)
+            VStack(spacing: 2) {
+                Text(MemoryLab.fmt(snapshot.availableBytes))
+                    .font(AppType.metric)
+                    .monospacedDigit()
                     .foregroundStyle(Tok.text)
-                if let s = viewModel.snapshot {
-                    Text(s.pressure.title)
-                        .font(AppType.caption)
-                        .foregroundStyle(pressureColor(s.pressure))
-                }
-                Spacer()
-                if let s = viewModel.snapshot {
-                    Text("\(MemoryLab.fmt(s.availableBytes)) of \(MemoryLab.fmt(s.totalBytes))")
-                        .font(AppType.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(Tok.text2)
-                }
-            }
-            if let s = viewModel.snapshot {
-                TickMeter(fraction: s.availableRatio, width: 480)
-                Text(s.pressure.blurb)
+                    .contentTransition(.numericText())
+                    .animation(reduceMotion ? nil : Motion.drain, value: snapshot.availableBytes)
+                Text(MemoryLab.fmt(snapshot.totalBytes))
                     .font(AppType.caption)
+                    .monospacedDigit()
                     .foregroundStyle(Tok.text2)
-            } else {
-                WaitCells()
-                    .frame(height: 20)
-            }
-        }
-        .padding(12)
-        .background(Tok.control.clipShape(RoundedRectangle(cornerRadius: 12)))
-    }
-
-    private var numbersCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Snapshot (vm_stat + swap)")
-                .font(AppType.label)
-                .foregroundStyle(Tok.text)
-            if let s = viewModel.snapshot {
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 4) {
-                    GridRow { Text("Available (free+inactive+spec+purge)").font(AppType.caption).foregroundStyle(Tok.text2); Text(MemoryLab.fmt(s.availableBytes)).font(AppType.caption).monospacedDigit().foregroundStyle(Tok.text) }
-                    GridRow { Text("Free").font(AppType.caption).foregroundStyle(Tok.text2); Text(MemoryLab.fmt(s.freeBytes)).font(AppType.caption).monospacedDigit().foregroundStyle(Tok.text) }
-                    GridRow { Text("Wired + active").font(AppType.caption).foregroundStyle(Tok.text2); Text(MemoryLab.fmt(s.wiredBytes + s.activeBytes)).font(AppType.caption).monospacedDigit().foregroundStyle(Tok.text) }
-                    GridRow { Text("Compressor (occupied)").font(AppType.caption).foregroundStyle(Tok.text2); Text(MemoryLab.fmt(s.compressorOccupiedBytes)).font(AppType.caption).monospacedDigit().foregroundStyle(Tok.text) }
-                    GridRow { Text("Swap used / total").font(AppType.caption).foregroundStyle(Tok.text2); Text("\(MemoryLab.fmt(s.swapUsedBytes)) / \(MemoryLab.fmt(s.swapTotalBytes))").font(AppType.caption).monospacedDigit().foregroundStyle(Tok.text) }
+                if let result = viewModel.result {
+                    Text(MemoryLab.signedFmt(result.freedAvailableBytes))
+                        .font(AppType.label)
+                        .monospacedDigit()
+                        .foregroundStyle(Tok.accentText)
+                        .contentTransition(.numericText())
+                        .animation(reduceMotion ? nil : Motion.drain, value: result.freedAvailableBytes)
                 }
-            } else {
-                Text("Reading…").font(AppType.caption).foregroundStyle(Tok.text2)
             }
         }
-        .padding(12)
-        .background(Tok.control.clipShape(RoundedRectangle(cornerRadius: 12)))
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(MemoryLab.fmt(snapshot.availableBytes)) available of \(MemoryLab.fmt(snapshot.totalBytes)). \(snapshot.pressure.title)")
     }
 
-    private var ladderCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Polite staircase — never quits an app")
-                .font(AppType.label)
-                .foregroundStyle(Tok.text)
-            ForEach(MemoryLab.Stage.allCases, id: \.self) { stage in
-                HStack(spacing: 8) {
-                    if let r = viewModel.stageResults.first(where: { $0.stage == stage }) {
-                        if r.ok { PixelCheck(cell: 1).frame(width: 7, height: 5) }
-                        else { PixelFailed(cell: 1).frame(width: 5, height: 5) }
-                    } else if viewModel.isWorking {
-                        WaitCells()
-                    } else {
-                        PixelStop(cell: 1).frame(width: 7, height: 7)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(stage.rawValue)
-                            .font(AppType.body)
-                            .foregroundStyle(Tok.text)
-                        Text(viewModel.stageResults.first(where: { $0.stage == stage })?.note ?? stage.blurb)
+    // MARK: - Ladder (four dots, one tick line)
+
+    private var ladderRow: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(MemoryLab.Stage.allCases, id: \.self) { stage in
+                    VStack(spacing: 4) {
+                        ladderDot(for: stage)
+                        Text(shortStageName(stage))
                             .font(AppType.caption)
                             .foregroundStyle(Tok.text2)
                     }
-                    Spacer()
+                    .frame(width: 72)
                 }
-                .frame(minHeight: 32)
             }
-            Text("What it never does: quit apps, kill processes, swapoff, or touch active/wired heaps.")
+            .frame(maxWidth: .infinity)
+            TickMeter(fraction: ladderFraction, width: 288)
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var ladderFraction: Double {
+        Double(viewModel.stageResults.count) / Double(MemoryLab.Stage.allCases.count)
+    }
+
+    private func shortStageName(_ stage: MemoryLab.Stage) -> String {
+        switch stage {
+        case .observe: return "Observe"
+        case .sync: return "Sync"
+        case .purge: return "Purge"
+        case .settle: return "Settle"
+        }
+    }
+
+    @ViewBuilder
+    private func ladderDot(for stage: MemoryLab.Stage) -> some View {
+        Group {
+            if let result = viewModel.stageResults.first(where: { $0.stage == stage }) {
+                if result.ok {
+                    PixelCheck(cell: 1)
+                        .frame(width: 7, height: 5)
+                } else {
+                    PixelFailed(cell: 1)
+                        .frame(width: 5, height: 5)
+                }
+            } else if viewModel.isWorking {
+                WaitCells()
+            } else {
+                PixelStop(cell: 1)
+                    .frame(width: 7, height: 7)
+            }
+        }
+        .frame(width: 14, height: 14)
+        .animation(reduceMotion ? nil : Motion.drain, value: viewModel.stageResults.count)
+    }
+
+    // MARK: - Stats (three numbers, nothing else)
+
+    private func statsRow(snapshot: MemoryLab.Snapshot) -> some View {
+        HStack(spacing: 32) {
+            statCell(title: "Free", value: MemoryLab.fmt(snapshot.freeBytes))
+            statCell(title: "Swap", value: MemoryLab.fmt(snapshot.swapUsedBytes))
+            statCell(title: "Purged", value: resultPurgedText)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var resultPurgedText: String {
+        viewModel.result.map { MemoryLab.fmt($0.purgedBytes) } ?? "—"
+    }
+
+    private func statCell(title: String, value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(AppType.title)
+                .monospacedDigit()
+                .foregroundStyle(Tok.text)
+                .contentTransition(.numericText())
+                .animation(reduceMotion ? nil : Motion.drain, value: value)
+            Text(title)
                 .font(AppType.caption)
                 .foregroundStyle(Tok.text2)
         }
-        .padding(12)
-        .background(Tok.control.clipShape(RoundedRectangle(cornerRadius: 12)))
     }
 
-    private var toggleCard: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Purge page cache (admin dialog)")
-                    .font(AppType.label)
-                    .foregroundStyle(Tok.text)
-                Text("Off = sync only. On keeps apps running, frees file cache.")
-                    .font(AppType.caption)
-                    .foregroundStyle(Tok.text2)
-            }
-            Spacer()
+    // MARK: - Purge toggle (one word)
+
+    private var purgeRow: some View {
+        HStack(spacing: 8) {
+            Text("Purge")
+                .font(AppType.label)
+                .foregroundStyle(Tok.text)
             AppToggle(isOn: Binding(
                 get: { viewModel.includePurge },
                 set: { viewModel.includePurge = $0 }
             ))
         }
-        .padding(12)
-        .background(Tok.control.clipShape(RoundedRectangle(cornerRadius: 12)))
+        .frame(maxWidth: .infinity)
     }
 
     private func pressureColor(_ p: MemoryLab.Pressure) -> Color {
         switch p {
         case .green: return Tok.statusOK
         case .yellow: return Tok.accentText
+        case .red: return Tok.statusBad
+        }
+    }
+}
+
+/// Circular pixel readout — square cells snapped to the grid around a
+/// 220pt circle. Filled blue with a white head, dust dots for empty.
+/// Transform + opacity only; snapped to whole pixels like TickMeter.
+private struct PixelRing: View {
+    let fraction: Double
+    let pressure: MemoryLab.Pressure
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let ticks = 40
+    private let size: CGFloat = 220
+
+    var body: some View {
+        let filled = Int((fraction * Double(ticks)).rounded())
+        let radius = size / 2 - 14
+        let center = size / 2
+        ZStack {
+            ForEach(0..<ticks, id: \.self) { i in
+                let angle = -Double.pi / 2 + Double(i) / Double(ticks) * 2 * Double.pi
+                let x = center + radius * CGFloat(cos(angle))
+                let y = center + radius * CGFloat(sin(angle))
+                if i < filled {
+                    let isHead = i == filled - 1 && filled < ticks
+                    Rectangle()
+                        .fill(isHead ? Tok.text : ringColor)
+                        .frame(width: Pixel.snap(4), height: Pixel.snap(4))
+                        .position(x: Pixel.snap(x), y: Pixel.snap(y))
+                } else {
+                    Rectangle()
+                        .fill(Tok.controlPressed)
+                        .frame(width: Pixel.snap(1), height: Pixel.snap(1))
+                        .position(x: Pixel.snap(x), y: Pixel.snap(y))
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(reduceMotion ? nil : Motion.drain, value: fraction)
+        .accessibilityHidden(true)
+    }
+
+    private var ringColor: Color {
+        switch pressure {
+        case .green: return Tok.statusOK
+        case .yellow: return Ramp.blue[3]
         case .red: return Tok.statusBad
         }
     }
