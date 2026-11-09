@@ -123,18 +123,21 @@ final class ScanViewModel {
     }
 
     /// Smart batch: select only Safe (regenerates, loses nothing). Never touches Okay/Risky.
+    /// Auto-select never grabs Docker-prune or info-only rows — those need a
+    /// running daemon / manual review.
     func selectSafe() {
         for category in categories {
-            for item in category.items where item.safety == .safe && !item.isDeleted {
+            for item in category.items where item.safety == .safe && !item.isDeleted && item.cleanAction == .trash {
                 item.isSelected = true
             }
         }
     }
 
     /// Smart batch (opt-in): Safe + Okay. Still never touches Risky — Risky needs per-item opt-in.
+    /// Still never touches Docker-managed rows; use the per-row toggle for those.
     func selectSafeAndOkay() {
         for category in categories {
-            for item in category.items where item.safety != .risky && !item.isDeleted {
+            for item in category.items where item.safety != .risky && !item.isDeleted && item.cleanAction == .trash {
                 item.isSelected = true
             }
         }
@@ -158,15 +161,22 @@ final class ScanViewModel {
 
     var confirmationTitle: String {
         let count = selectedItemCount
-        return "Move \(count) item\(count == 1 ? "" : "s") to Trash?"
+        return "Clean \(count) item\(count == 1 ? "" : "s")?"
     }
 
     var confirmationMessage: String {
         let formatted = ByteCountFormatter.string(fromByteCount: totalSelected, countStyle: .file)
         let safe = categories.reduce(0) { $0 + $1.safeSelectedSize }
         let safeFormatted = ByteCountFormatter.string(fromByteCount: safe, countStyle: .file)
-        if safe == totalSelected {
+        let hasDockerPrune = categories.flatMap(\.items).contains { item in
+            if case .dockerPrune = item.cleanAction { return item.isSelected }
+            return false
+        }
+        if safe == totalSelected && !hasDockerPrune {
             return "This moves \(formatted) to Trash. Items stay recoverable from Trash."
+        }
+        if hasDockerPrune {
+            return "This cleans \(formatted), including docker prune via the CLI. File items stay recoverable from Trash."
         }
         return "This moves \(formatted), of which \(safeFormatted) is marked Safe. Okay items cost time to rebuild and Risky items delete data. They stay recoverable from Trash."
     }

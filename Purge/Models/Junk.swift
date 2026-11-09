@@ -29,11 +29,29 @@ enum Safety: Sendable {
     var isDestructive: Bool { self == .risky }
 }
 
+/// How an item is actually removed. Most items are trashed (recoverable).
+/// Docker daemon caches are pruned via the `docker` CLI — never by trashing VM storage.
+enum DockerPruneKind: String, Sendable {
+    case builder
+    case dangling
+    case images
+    case system
+}
+
+enum CleanAction: Sendable, Equatable {
+    /// Move to Trash (recoverable). Default for every file item.
+    case trash
+    /// Run a `docker ... prune` subcommand instead of touching the filesystem.
+    case dockerPrune(DockerPruneKind)
+    /// Size-only row. Never deleted by Cleaner — shown for awareness.
+    case infoOnly
+}
+
 @Observable
 final class JunkItem: Identifiable, Sendable {
     let id: UUID
     let name: String
-    /// nil for Time Machine snapshots (deleted via tmutil, not Trash).
+    /// nil for Time Machine snapshots (deleted via tmutil) and docker prune rows.
     let url: URL?
     /// Time Machine snapshot ID when `url == nil`.
     let snapshotID: String?
@@ -41,6 +59,7 @@ final class JunkItem: Identifiable, Sendable {
     let size: Int64
     let safety: Safety
     let detail: String?
+    let cleanAction: CleanAction
     var isSelected: Bool = false
     var isDeleted: Bool = false
     var error: String?
@@ -51,7 +70,8 @@ final class JunkItem: Identifiable, Sendable {
         snapshotID: String? = nil,
         size: Int64,
         safety: Safety,
-        detail: String? = nil
+        detail: String? = nil,
+        cleanAction: CleanAction = .trash
     ) {
         self.id = UUID()
         self.name = name
@@ -60,6 +80,12 @@ final class JunkItem: Identifiable, Sendable {
         self.size = size
         self.safety = safety
         self.detail = detail
+        self.cleanAction = cleanAction
+    }
+
+    /// Non-Trash rows (docker prune, info-only) are never selected by Auto-clean.
+    var isAutoCleanable: Bool {
+        cleanAction == .trash && safety != .risky
     }
 }
 
@@ -70,6 +96,7 @@ enum CategoryKind: String, Sendable, CaseIterable {
     case packageManagers = "Packages"
     case downloadsMailBackups = "Downloads"
     case docker = "Docker"
+    case dockerBuild = "Docker Build"
     case trash = "Trash"
     case snapshots = "Snapshots"
     case orphaned = "Orphaned"
@@ -82,6 +109,7 @@ enum CategoryKind: String, Sendable, CaseIterable {
         case .packageManagers: "terminal"
         case .downloadsMailBackups: "tray.and.arrow.down"
         case .docker: "container"
+        case .dockerBuild: "shippingbox.fill"
         case .trash: "trash"
         case .snapshots: "clock.arrow.circlepath"
         case .orphaned: "questionmark.folder.fill"
@@ -91,6 +119,11 @@ enum CategoryKind: String, Sendable, CaseIterable {
     /// Whether this category needs Full Disk Access to enumerate.
     var requiresFDA: Bool {
         self == .downloadsMailBackups
+    }
+
+    /// Categories with daemon-managed storage — never trashed in place.
+    var isDockerManaged: Bool {
+        self == .docker || self == .dockerBuild
     }
 }
 

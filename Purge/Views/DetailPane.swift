@@ -254,7 +254,7 @@ struct DetailPane: View {
         case .notScanned: return "Press ⌘R to scan."
         case .scanning: return "Measuring allocated sizes."
         case .results: return "Only Safe items regenerate automatically. Okay costs time. Risky deletes data."
-        case .cleaning: return "Moving selected items to Trash — Safe + Okay, never Risky."
+        case .cleaning: return "Cleaning files to Trash and Docker via docker prune — Safe + Okay, never Risky."
         case .cleaned:
             if let freed = viewModel.lastFreed {
                 var line = "Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))."
@@ -352,9 +352,20 @@ private struct ItemRow: View {
         self.maxSize = viewModel.maxItemSize
     }
 
+    /// Info-only rows (Docker.raw, VM disks) are size-only — never selectable.
+    private var isSelectable: Bool {
+        item.cleanAction != .infoOnly
+    }
+
     var body: some View {
         HStack(spacing: 12) {
-            AppToggle(isOn: Binding(get: { item.isSelected }, set: { item.isSelected = $0 }))
+            if isSelectable {
+                AppToggle(isOn: Binding(get: { item.isSelected }, set: { item.isSelected = $0 }))
+            } else {
+                PixelExclamation(cell: 1, color: Tok.text2)
+                    .frame(width: 20)
+                    .accessibilityLabel("Info only — not selectable")
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .font(AppType.label)

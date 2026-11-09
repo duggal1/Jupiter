@@ -44,10 +44,48 @@ enum Cleaner {
     /// items; actual APFS thinning for snapshots is left to the caller to
     /// re-measure disk.
     static func clean(items: [JunkItem], onProgress: Progress?) async -> Outcome {
+        resetPruneBatch()
         var outcome = Outcome()
+        // Docker prunes coalesce: one CLI call per kind, not one per row.
+        var dockerKinds: [DockerPruneKind: [JunkItem]] = [:]
         for item in items {
+            if case .dockerPrune(let kind) = item.cleanAction {
+                dockerKinds[kind, default: []].append(item)
+            }
+        }
+        // Materialise docker prune items so the single-prune path below can run.
+        let dockerItems = dockerKinds.flatMap(\.value)
+        let fileItems = items.filter {
+            if case .dockerPrune = $0.cleanAction { return false }
+            return true
+        }
+
+        for item in dockerItems {
+            if case .dockerPrune(let kind) = item.cleanAction {
+                do {
+                    try await pruneOnce(kind)
+                    outcome.freed += item.size
+                    item.isDeleted = true
+                } catch {
+                    outcome.failed += 1
+                    item.error = error.localizedDescription
+                    outcome.failureMessages.append("\(item.name): \(DockerScanner.pruneLabel(kind)) — \(error.localizedDescription)")
+                }
+                await onProgress?(outcome.freed, item)
+            }
+        }
+
+        for item in fileItems {
             if Task.isCancelled { break }
             await Task.yield()
+            if item.cleanAction == .infoOnly {
+                outcome.failed += 1
+                let message = "\(item.name): info-only storage — not trashed. \(item.detail ?? "Clean via the owning app.")"
+                item.error = message
+                outcome.failureMessages.append(message)
+                await onProgress?(outcome.freed, item)
+                continue
+            }
             if item.snapshotID != nil {
                 // Snapshots: actual freed bytes are measured by the caller
                 // via disk-space delta rather than per-item size (tmutil
@@ -107,6 +145,27 @@ enum Cleaner {
             await onProgress?(outcome.freed, item)
         }
         return outcome
+    }
+
+    /// Runs one `docker ... prune -f` per kind per clean batch. Callers
+    /// coalesce rows; this helper guards against double-prune races.
+    private static var prunedThisBatch: Set<DockerPruneKind> = []
+    private static var pruneLock = NSLock()
+
+    private static func pruneOnce(_ kind: DockerPruneKind) async throws {
+        pruneLock.lock()
+        let already = prunedThisBatch.contains(kind)
+        prunedThisBatch.insert(kind)
+        pruneLock.unlock()
+        if already { return }
+        try await DockerScanner.prune(kind: kind)
+    }
+
+    /// Call at the end of a top-level clean batch to reset the coalescing set.
+    static func resetPruneBatch() {
+        pruneLock.lock()
+        prunedThisBatch = []
+        pruneLock.unlock()
     }
 
     private static func deleteSnapshot(id: String) async throws {

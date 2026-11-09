@@ -40,7 +40,7 @@ struct CleanConfirmDialog: View {
                 }
                 DialogFooter(
                     cancelTitle: "Cancel",
-                    confirmTitle: "Move to Trash",
+                    confirmTitle: "Clean",
                     confirmDisabled: viewModel.totalSelected == 0
                 ) {
                     isPresented = false

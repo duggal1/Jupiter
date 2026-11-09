@@ -2,8 +2,12 @@ import SwiftUI
 
 /// Sidebar 220, rows 32 tall 2 apart, first row at y = 52, icon column 20,
 /// one sliding washStrong capsule. Status footer: 20 pt pixel mark + one word.
+/// Watchdog sits as a fixed row under the categories — it's a mode, not a
+/// junk category, so it never appears in scan totals.
 struct SidebarPane: View {
     @Bindable var viewModel: ScanViewModel
+    @Binding var pane: AppPane
+    @Bindable var watchdogViewModel: WatchdogViewModel
     @Namespace private var pill
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -15,6 +19,7 @@ struct SidebarPane: View {
         VStack(spacing: 0) {
             reclaimHeader
             categoryRows
+            watchdogRow
             Spacer()
             statusFooter
         }
@@ -79,15 +84,35 @@ struct SidebarPane: View {
                 ForEach(viewModel.sortedCategories) { category in
                     SidebarRow(
                         category: category,
-                        isSelected: viewModel.selectedCategoryKind == category.kind,
+                        isSelected: pane == .clean && viewModel.selectedCategoryKind == category.kind,
+                        isScanning: viewModel.phase == .scanning,
                         pill: pill,
-                        viewModel: viewModel,
+                        onTap: {
+                            pane = .clean
+                            viewModel.selectedCategoryKind = category.kind
+                            viewModel.categories.first { $0.kind == category.kind }?.isExpanded = true
+                        },
                         reduceMotion: reduceMotion
                     )
                 }
             }
             .padding(.horizontal, 8)
         }
+    }
+
+    private var watchdogRow: some View {
+        VStack(spacing: 2) {
+            WatchdogSidebarRow(
+                isSelected: pane == .watchdog,
+                enabled: watchdogViewModel.config.enabled,
+                statusText: watchdogViewModel.statusLine,
+                pill: pill,
+                reduceMotion: reduceMotion,
+                action: { pane = .watchdog }
+            )
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
     }
 
     private var statusFooter: some View {
@@ -130,11 +155,69 @@ struct SidebarPane: View {
     }
 }
 
+private struct WatchdogSidebarRow: View {
+    let isSelected: Bool
+    let enabled: Bool
+    let statusText: String
+    let pill: Namespace.ID
+    let reduceMotion: Bool
+    let action: () -> Void
+    @State private var hovering = false
+    @State private var pressed = false
+
+    var body: some View {
+        SwiftUI.Button {
+            action()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "timer")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Tok.text2)
+                    .frame(width: 20, height: 20)
+                Text("Watchdog")
+                    .font(AppType.label)
+                    .foregroundStyle(Tok.text)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Circle()
+                    .fill(enabled ? Tok.statusOK : Tok.controlPressed)
+                    .frame(width: 6, height: 6)
+                    .opacity(hovering || isSelected ? 1 : 0.7)
+                    .accessibilityLabel(enabled ? "Watchdog on" : "Watchdog off")
+                Text(statusText)
+                    .font(AppType.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(Tok.text2)
+                    .lineLimit(1)
+            }
+            .frame(height: 32)
+            .padding(.horizontal, 8)
+            .background {
+                if isSelected {
+                    (hovering ? Tok.control : Tok.washStrong)
+                        .clipShape(Capsule())
+                        .matchedGeometryEffect(id: "watchdog", in: pill)
+                } else if hovering {
+                    Tok.control
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .motionPress(pressed: pressed, reduceMotion: reduceMotion)
+        .onHover { hovering = $0 }
+        .animation(Motion.hover(hovering: hovering, reduceMotion: reduceMotion), value: hovering)
+        .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in pressed = true }.onEnded { _ in pressed = false })
+        .clickable()
+    }
+}
+
 private struct SidebarRow: View {
     let category: JunkCategory
     let isSelected: Bool
+    let isScanning: Bool
     let pill: Namespace.ID
-    let viewModel: ScanViewModel
+    let onTap: () -> Void
     let reduceMotion: Bool
     @State private var hovering = false
     @State private var pressed = false
@@ -158,8 +241,7 @@ private struct SidebarRow: View {
 
     var body: some View {
         SwiftUI.Button {
-            viewModel.selectedCategoryKind = category.kind
-            viewModel.categories.first { $0.kind == category.kind }?.isExpanded = true
+            onTap()
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: category.kind.symbol)
@@ -205,7 +287,7 @@ private struct SidebarRow: View {
     }
 
     private var sizeLabel: String {
-        if viewModel.phase == .scanning && !category.didScan { return "—" }
+        if isScanning && !category.didScan { return "—" }
         return ByteCountFormatter.string(fromByteCount: category.totalSize, countStyle: .file)
     }
 }

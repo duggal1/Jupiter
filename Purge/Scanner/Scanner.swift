@@ -53,6 +53,31 @@ enum Scanner {
         await scan(kind: kind, hasFDA: hasFDA, includeDownloads: includeDownloads, isCancelled: { Task.isCancelled })
     }
 
+    /// Watchdog fast path: only categories that can yield Safe (+ optional
+    /// Okay) items. Skips Docker VM traversal, tmutil snapshots, iOS backups,
+    /// and Downloads — the expensive + Risky-only work — so a background run
+    /// stays cheap. Docker builder is included only when the watchdog opts in.
+    static func scanWatchdog(config: WatchdogConfig, hasFDA: Bool) async -> [JunkCategory] {
+        let kinds: [CategoryKind] = [
+            .appCaches, .logsAndReports, .xcode, .packageManagers, .trash,
+        ] + (config.includeOkay ? [.orphaned] : [])
+          + (config.includeDockerBuilderCache ? [.dockerBuild] : [])
+        return await withTaskGroup(of: (CategoryKind, [JunkItem]).self) { group in
+            for kind in kinds {
+                group.addTask(priority: .userInitiated) {
+                    let items = await scan(kind: kind, hasFDA: hasFDA, includeDownloads: false, isCancelled: { Task.isCancelled })
+                    return (kind, items)
+                }
+            }
+            var map: [CategoryKind: [JunkItem]] = [:]
+            for await (kind, items) in group {
+                if Task.isCancelled { break }
+                map[kind] = items
+            }
+            return kinds.map { JunkCategory(kind: $0, items: map[$0] ?? []) }
+        }
+    }
+
     private static func scan(kind: CategoryKind, hasFDA: Bool, includeDownloads: Bool, isCancelled: @escaping @Sendable () -> Bool) async -> [JunkItem] {
         switch kind {
         case .appCaches:
@@ -66,7 +91,9 @@ enum Scanner {
         case .downloadsMailBackups:
             return await scanDownloadsMailBackups(hasFDA: hasFDA, includeDownloads: includeDownloads)
         case .docker:
-            return await scanDocker()
+            return await DockerScanner.scanDockerData()
+        case .dockerBuild:
+            return await DockerScanner.scanDockerBuild()
         case .trash:
             return await scanChildren(at: ".Trash", safety: .safe)
         case .snapshots:
@@ -319,20 +346,14 @@ enum Scanner {
         return items.sorted { $0.size > $1.size }
     }
 
-    private static func scanDocker() async -> [JunkItem] {
-        var items: [JunkItem] = []
-        let candidates: [(relative: String, label: String)] = [
-            ("Library/Containers/com.docker.docker/Data", "Docker data"),
-            (".docker", "Docker config"),
-        ]
-        for candidate in candidates {
-            let url = home.appendingPathComponent(candidate.relative)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            let size = await DiskSize.allocatedSize(of: url)
-            items.append(JunkItem(name: candidate.label, url: url, size: size, safety: .risky, detail: candidate.relative))
-        }
-        return items.sorted { $0.size > $1.size }
+    /// Docker file + VM disk layout lives in DockerScanner — kept here as a
+    /// thin shim so historical call sites stay stable.
+    static func scanDocker() async -> [JunkItem] {
+        await DockerScanner.scanDockerData()
+    }
+
+    static func scanDockerBuild() async -> [JunkItem] {
+        await DockerScanner.scanDockerBuild()
     }
 
     private static func scanSnapshots() async -> [JunkItem] {

@@ -1,20 +1,28 @@
 import SwiftUI
-import AppKit
 
 /// Shell (§7): custom HStack of sidebar and detail on bg. No NavigationSplitView,
 /// no system toolbar. Route change = opacity cross-fade only.
 struct ShellView: View {
     @State private var viewModel = ScanViewModel()
+    @State private var watchdogViewModel = WatchdogViewModel()
     @State private var showingCleanDialog = false
+    @State private var pane: AppPane = .clean
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
-                SidebarPane(viewModel: viewModel)
+                SidebarPane(viewModel: viewModel, pane: $pane, watchdogViewModel: watchdogViewModel)
                 Tok.bg
                     .frame(width: 1)
-                DetailPane(viewModel: viewModel, showingCleanDialog: $showingCleanDialog)
+                Group {
+                    if pane == .watchdog {
+                        WatchdogPane(viewModel: watchdogViewModel)
+                    } else {
+                        DetailPane(viewModel: viewModel, showingCleanDialog: $showingCleanDialog)
+                    }
+                }
+                .transition(reduceMotion ? .identity : .opacity)
             }
             .background(Tok.bg)
 
@@ -28,6 +36,12 @@ struct ShellView: View {
         .focusEffectDisabled()
         .onAppear { viewModel.scan() }
     }
+}
+
+/// Top-level pane routing: Clean (scan/detail) vs Watchdog settings.
+enum AppPane: Hashable {
+    case clean
+    case watchdog
 }
 
 /// System blur behind the sidebar (the blur exception in §1).
