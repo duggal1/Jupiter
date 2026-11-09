@@ -10,6 +10,13 @@ You're not out of space. The junk macOS hides is. Jupiter finds it, measures it 
 
 </div>
 
+## Preview
+
+<p align="center">
+  <img src="landing/assets/jupiter-home.png" width="49%" alt="Jupiter home" />
+  <img src="landing/assets/jupiter-memory.png" width="49%" alt="Jupiter memory" />
+</p>
+
 ## Features
 
 - **Tiny:** ~1.3 MB native binary. No Electron. No Chrome inside. Uses almost no RAM.
