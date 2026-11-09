@@ -21,6 +21,15 @@ enum Motion {
 
     static let insert = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.28)
     static let drain = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.28)
+
+    /// Hyper-smooth spring for hero reads (ring fill, numbers, dots).
+    /// Transform + opacity only — no blur/shadow/layout churn.
+    static func spring(reduceMotion: Bool) -> Animation? {
+        guard !reduceMotion else { return nil }
+        return .spring(response: 0.35, dampingFraction: 0.82)
+    }
+
+    static let springSoft = Animation.spring(response: 0.45, dampingFraction: 0.86)
 }
 
 extension View {
