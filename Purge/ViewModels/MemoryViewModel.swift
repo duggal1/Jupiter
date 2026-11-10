@@ -51,26 +51,23 @@ final class MemoryViewModel {
         message = nil
         Task {
             let includePurge = self.includePurge
-            let ladder = await MemoryLab.runLadder(includePurge: includePurge) { [weak self] stage in
-                Task { @MainActor in
-                    self?.stageResults.append(stage)
-                }
-            }
+            // The ladder reports stages from a background context; the stage
+            // list is rebuilt from the result below, so the callback only
+            // needs to note that the run started.
+            let ladder = await MemoryLab.runLadder(includePurge: includePurge)
             snapshot = ladder.after
             result = ladder
-            // If the caller only consumed the last stage via the callback
-            // fan-in, rebuild the full list from the result.
             stageResults = ladder.stages
             phase = .done
             let freed = ladder.freedAvailableBytes
             if let purge = ladder.stages.first(where: { $0.stage == .purge }), !purge.ok {
-                message = "Purge skipped — \(purge.note.isEmpty ? "admin cancelled" : purge.note) Available changed \(MemoryLab.signedFmt(freed))."
+                message = "Purge skipped. Available changed \(MemoryLab.signedFmt(freed))."
             } else if freed > 0 {
-                message = "Freed \(MemoryLab.fmt(freed)) available · purged \(MemoryLab.fmt(ladder.purgedBytes)). Apps kept running."
+                message = "Freed \(MemoryLab.fmt(freed)) available · purged \(MemoryLab.fmt(ladder.purgedBytes))."
             } else if freed < -50_000_000 {
-                message = "Available dropped \(MemoryLab.fmt(-freed)) while settling (apps allocated). Purged \(MemoryLab.fmt(ladder.purgedBytes)). No apps quit."
+                message = "Available dropped \(MemoryLab.fmt(-freed)) while settling. Purged \(MemoryLab.fmt(ladder.purgedBytes))."
             } else {
-                message = "Memory already tight-or-better. Purged \(MemoryLab.fmt(ladder.purgedBytes)). Apps kept running."
+                message = "Memory already tight-or-better. Purged \(MemoryLab.fmt(ladder.purgedBytes))."
             }
         }
     }

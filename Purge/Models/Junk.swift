@@ -47,8 +47,116 @@ enum CleanAction: Sendable, Equatable {
     case infoOnly
 }
 
+/// An immutable scan result.
+///
+/// The scanner runs off the main actor and produces these; they carry no
+/// mutable state, so they cross actor boundaries safely. The UI turns them
+/// into `JunkItem`s on the main actor, and only the UI mutates them.
+struct ScannedItem: Sendable, Identifiable {
+    let id: UUID
+    let name: String
+    /// nil for Time Machine snapshots (deleted via tmutil) and docker prune rows.
+    let url: URL?
+    /// Time Machine snapshot ID when `url == nil`.
+    let snapshotID: String?
+    /// Allocated bytes (st_blocks × 512), never logical size.
+    let size: Int64
+    let safety: Safety
+    let detail: String?
+    let cleanAction: CleanAction
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        url: URL? = nil,
+        snapshotID: String? = nil,
+        size: Int64,
+        safety: Safety,
+        detail: String? = nil,
+        cleanAction: CleanAction = .trash
+    ) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.snapshotID = snapshotID
+        self.size = size
+        self.safety = safety
+        self.detail = detail
+        self.cleanAction = cleanAction
+    }
+}
+
+/// The minimum a cleaner needs to act on an item.
+///
+/// The cleaner never touches the observable model — it works on these plain
+/// values and reports outcomes, so no model state is ever written off the
+/// main actor.
+struct CleanTarget: Sendable {
+    let id: UUID
+    let name: String
+    let url: URL?
+    let snapshotID: String?
+    let size: Int64
+    let cleanAction: CleanAction
+
+    init(
+        id: UUID,
+        name: String,
+        url: URL?,
+        snapshotID: String?,
+        size: Int64,
+        cleanAction: CleanAction
+    ) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.snapshotID = snapshotID
+        self.size = size
+        self.cleanAction = cleanAction
+    }
+
+    init(item: JunkItem) {
+        self.init(
+            id: item.id,
+            name: item.name,
+            url: item.url,
+            snapshotID: item.snapshotID,
+            size: item.size,
+            cleanAction: item.cleanAction
+        )
+    }
+
+    init(scanned: ScannedItem) {
+        self.init(
+            id: scanned.id,
+            name: scanned.name,
+            url: scanned.url,
+            snapshotID: scanned.snapshotID,
+            size: scanned.size,
+            cleanAction: scanned.cleanAction
+        )
+    }
+}
+
+/// One removable thing with a real allocated size.
+///
+/// ## Actor isolation
+///
+/// `JunkItem` is `@Observable` **and** carries mutable state, so it cannot
+/// be `Sendable` — the compiler is right, and it is why the clean used to
+/// lose updates: `Cleaner` wrote `isDeleted` from a detached task while the
+/// view model read it on the main actor.
+///
+/// The model is now **main-actor bound**. The scanner produces immutable
+/// `ScannedItem`s off the main actor and hands them over once; after that
+/// every mutation happens on the main actor, in one place
+/// (`ScanViewModel.apply`).
+///
+/// `Identifiable` is satisfied by the non-isolated `id` property, so the
+/// conformance does not cross the isolation boundary.
 @Observable
-final class JunkItem: Identifiable, Sendable {
+@MainActor
+final class JunkItem: Identifiable {
     let id: UUID
     let name: String
     /// nil for Time Machine snapshots (deleted via tmutil) and docker prune rows.
@@ -64,29 +172,24 @@ final class JunkItem: Identifiable, Sendable {
     var isDeleted: Bool = false
     var error: String?
 
-    init(
-        name: String,
-        url: URL? = nil,
-        snapshotID: String? = nil,
-        size: Int64,
-        safety: Safety,
-        detail: String? = nil,
-        cleanAction: CleanAction = .trash
-    ) {
-        self.id = UUID()
-        self.name = name
-        self.url = url
-        self.snapshotID = snapshotID
-        self.size = size
-        self.safety = safety
-        self.detail = detail
-        self.cleanAction = cleanAction
+    init(scanned: ScannedItem) {
+        self.id = scanned.id
+        self.name = scanned.name
+        self.url = scanned.url
+        self.snapshotID = scanned.snapshotID
+        self.size = scanned.size
+        self.safety = scanned.safety
+        self.detail = scanned.detail
+        self.cleanAction = scanned.cleanAction
     }
 
     /// Non-Trash rows (docker prune, info-only) are never selected by Auto-clean.
     var isAutoCleanable: Bool {
         cleanAction == .trash && safety != .risky
     }
+
+    /// The plain value a cleaner acts on.
+    var cleanTarget: CleanTarget { CleanTarget(item: self) }
 }
 
 enum CategoryKind: String, Sendable, CaseIterable {
@@ -128,8 +231,11 @@ enum CategoryKind: String, Sendable, CaseIterable {
 }
 
 @Observable
-final class JunkCategory: Identifiable, Sendable {
-    let kind: CategoryKind
+@MainActor
+final class JunkCategory: Identifiable {
+    /// The category itself is the identity. `kind` is immutable, so the
+    /// `Identifiable` conformance does not cross the isolation boundary.
+    nonisolated let kind: CategoryKind
     var items: [JunkItem]
     var isExpanded: Bool = false
     var didScan: Bool = false
@@ -140,7 +246,7 @@ final class JunkCategory: Identifiable, Sendable {
         self.items = items
     }
 
-    var id: CategoryKind { kind }
+    nonisolated var id: CategoryKind { kind }
 
     var totalSize: Int64 { items.reduce(0) { $0 + $1.size } }
     var selectedSize: Int64 { items.filter(\.isSelected).reduce(0) { $0 + $1.size } }

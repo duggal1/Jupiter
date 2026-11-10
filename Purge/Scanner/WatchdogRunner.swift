@@ -47,14 +47,14 @@ enum WatchdogRunner {
         // snapshots and iOS backups are skipped entirely.
         let cats = await Scanner.scanWatchdog(config: cfg, hasFDA: hasFDA)
 
-        var toClean: [JunkItem] = []
+        var toClean: [CleanTarget] = []
         for cat in cats {
-            for item in cat.items where !item.isDeleted {
+            for item in cat.items {
                 guard cfg.allowedSafeties.contains(item.safety) else { continue }
                 if item.snapshotID != nil { continue }
                 if item.cleanAction == .infoOnly { continue }
                 if cat.kind == .trash && !cfg.includeTrash { continue }
-                toClean.append(item)
+                toClean.append(CleanTarget(scanned: item))
             }
         }
 
@@ -68,7 +68,7 @@ enum WatchdogRunner {
             return 0
         }
 
-        let outcome = await Cleaner.clean(items: toClean)
+        let (outcome, _) = await Cleaner.clean(items: toClean)
         cfg.lastFreed = outcome.freed
         cfg.lastFailed = outcome.failed
         cfg.lastNote = outcome.failureMessages.first ?? (outcome.freed > 0 ? "Freed \(outcome.freed) bytes." : nil)

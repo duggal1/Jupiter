@@ -41,8 +41,8 @@ enum DockerScanner {
 
     /// Safe builder + buildx cache. File sizes are measured; cleaning runs
     /// the CLI prune, never `trashItem` on a live cache dir.
-    static func scanDockerBuild() async -> [JunkItem] {
-        var items: [JunkItem] = []
+    static func scanDockerBuild() async -> [ScannedItem] {
+        var items: [ScannedItem] = []
 
         let cacheDirs: [(relative: String, label: String)] = [
             ("Library/Caches/docker-buildx", "Buildx cache"),
@@ -55,7 +55,7 @@ enum DockerScanner {
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
             let size = await DiskSize.allocatedSize(of: url)
             guard size > 0 else { continue }
-            items.append(JunkItem(
+            items.append(ScannedItem(
                 name: candidate.label,
                 url: url,
                 size: size,
@@ -70,7 +70,7 @@ enum DockerScanner {
         if let rows = await systemDF() {
             for row in rows where row.type == "Build Cache" && row.reclaimable > 0 {
                 if items.contains(where: { $0.name.localizedCaseInsensitiveContains("build") }) { continue }
-                items.append(JunkItem(
+                items.append(ScannedItem(
                     name: "Build cache (daemon)",
                     size: row.reclaimable,
                     safety: .safe,
@@ -87,8 +87,8 @@ enum DockerScanner {
     /// Daemon rows (Okay / Risky) + VM disk storage (Risky, InfoOnly).
     /// VM disks are sized honestly but are never trashable — the detail
     /// tells the user the safe removal path.
-    static func scanDockerData() async -> [JunkItem] {
-        var items: [JunkItem] = []
+    static func scanDockerData() async -> [ScannedItem] {
+        var items: [ScannedItem] = []
 
         // Daemon df: images + containers are Okay (rebuild cost), volumes Risky.
         if let rows = await systemDF() {
@@ -96,7 +96,7 @@ enum DockerScanner {
                 switch row.type {
                 case "Images":
                     if row.reclaimable > 0 {
-                        items.append(JunkItem(
+                        items.append(ScannedItem(
                             name: "Unused images",
                             size: row.reclaimable,
                             safety: .okay,
@@ -106,7 +106,7 @@ enum DockerScanner {
                     }
                 case "Containers":
                     if row.reclaimable > 0 {
-                        items.append(JunkItem(
+                        items.append(ScannedItem(
                             name: "Stopped containers",
                             size: row.reclaimable,
                             safety: .okay,
@@ -116,7 +116,7 @@ enum DockerScanner {
                     }
                 case "Local Volumes":
                     if row.reclaimable > 0 {
-                        items.append(JunkItem(
+                        items.append(ScannedItem(
                             name: "Unused volumes",
                             size: row.reclaimable,
                             safety: .risky,
@@ -151,7 +151,7 @@ enum DockerScanner {
             if candidate.label == "Docker data", items.contains(where: { $0.name == "Docker.raw" }) { continue }
             let size = await DiskSize.allocatedSize(of: url)
             guard size > 0 else { continue }
-            items.append(JunkItem(
+            items.append(ScannedItem(
                 name: candidate.label,
                 url: url,
                 size: size,
@@ -177,14 +177,28 @@ enum DockerScanner {
     /// is down or CLI is absent — file caches still scan.
     /// Coalesced: scanAll runs Docker + Docker Build in parallel, so the
     /// second caller reuses the in-flight task instead of forking docker twice.
+    ///
+    /// The lock is only ever taken inside the synchronous helpers below, so
+    /// it is never held across an `await` and never taken from an async
+    /// context directly (Swift 6 forbids both).
     private static var dfCache: (Date, [DFRow]?) = (.distantPast, nil)
     private static let dfLock = NSLock()
 
-    static func systemDF() async -> [DFRow]? {
+    private static func cachedDF() -> [DFRow]? {
         dfLock.lock()
-        let cached = dfCache
+        defer { dfLock.unlock() }
+        guard Date().timeIntervalSince(dfCache.0) < 5 else { return nil }
+        return dfCache.1
+    }
+
+    private static func storeDF(_ rows: [DFRow]?) {
+        dfLock.lock()
+        dfCache = (Date(), rows)
         dfLock.unlock()
-        if Date().timeIntervalSince(cached.0) < 5, let rows = cached.1 { return rows }
+    }
+
+    static func systemDF() async -> [DFRow]? {
+        if let cached = cachedDF() { return cached }
         guard let docker = dockerBinary() else { return nil }
         let rows = await Task.detached(priority: .userInitiated) {
             let process = Process()
@@ -211,9 +225,7 @@ enum DockerScanner {
                 return nil
             }
         }.value
-        dfLock.lock()
-        dfCache = (Date(), rows)
-        dfLock.unlock()
+        storeDF(rows)
         return rows
     }
 

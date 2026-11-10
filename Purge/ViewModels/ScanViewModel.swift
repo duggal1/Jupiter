@@ -98,19 +98,15 @@ final class ScanViewModel {
     }
 
     private func runScan(hasFDA: Bool, includeDownloads: Bool) async {
-        await withTaskGroup(of: (CategoryKind, [JunkItem]).self) { group in
-            for kind in CategoryKind.allCases {
-                group.addTask(priority: .userInitiated) {
-                    let items = await Scanner.scan(kind: kind, hasFDA: hasFDA, includeDownloads: includeDownloads)
-                    return (kind, items)
-                }
-            }
-            for await (kind, items) in group {
-                if Task.isCancelled { break }
-                if let category = categories.first(where: { $0.kind == kind }) {
-                    category.items = items
-                    category.didScan = true
-                }
+        // The scanner returns immutable `ScannedItem`s; the observable
+        // `JunkItem`s are created here, on the main actor. Nothing mutable
+        // crosses an actor boundary.
+        let scanned = await Scanner.scanAll(hasFDA: hasFDA, includeDownloads: includeDownloads)
+        guard !Task.isCancelled else { return }
+        for entry in scanned {
+            if let category = categories.first(where: { $0.kind == entry.kind }) {
+                category.items = entry.items.map { JunkItem(scanned: $0) }
+                category.didScan = true
             }
         }
     }
@@ -204,50 +200,45 @@ final class ScanViewModel {
         ramFlushed = false
         ramNote = nil
         let before = Cleaner.availableBytes(on: URL(fileURLWithPath: "/"))
-        // Detached so Trash I/O never blocks the UI runloop.
+        // The cleaner works on plain values, so it can leave the main actor.
+        let targets = selected.map(\.cleanTarget)
+        let involvedSnapshots = selected.contains { $0.snapshotID != nil }
+        // Detached so Trash I/O never blocks the UI runloop. The Cleaner
+        // returns outcomes; every model mutation happens back on the
+        // MainActor in `apply(results:)` — no cross-thread @Observable writes.
         cleanTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            let outcome = await Cleaner.clean(items: selected) { [weak self] freed, item in
+            let (outcome, results) = await Cleaner.clean(items: targets) { [weak self] freed, item in
                 guard let self else { return }
                 // Already on MainActor (Progress is @MainActor).
                 self.cleanFreed = freed
                 self.cleanCurrent = item.name
                 self.cleanDoneCount += 1
-                if item.isDeleted {
-                    for category in self.categories where category.items.contains(where: { $0.id == item.id }) {
-                        category.items.removeAll { $0.id == item.id }
-                    }
-                } else if let error = item.error, let found = self.categories.flatMap(\.items).first(where: { $0.id == item.id }) {
-                    found.error = error
-                }
             }
             let after = Cleaner.availableBytes(on: URL(fileURLWithPath: "/"))
             let measured = max(0, after - before)
-            let involvedSnapshots = selected.contains { $0.snapshotID != nil }
             let freed = involvedSnapshots ? max(outcome.freed, measured) : outcome.freed
             await MainActor.run {
                 if Task.isCancelled { return }
+                // Apply every item result on the main actor, in one pass, so
+                // the list and the totals update in the same frame the clean
+                // reports. Previously the deleted rows were removed from a
+                // background thread's write and the UI lagged behind.
+                self.apply(results: results)
                 self.lastFreed = freed
                 self.lastFailed = outcome.failed
                 self.lastFailureNote = outcome.failureMessages.first
-                // Sweep any remaining deleted (e.g. cancelled mid-batch).
-                for category in self.categories {
-                    category.items.removeAll { $0.isDeleted }
-                    for item in category.items where item.isDeleted {
-                        item.isSelected = false
-                    }
-                }
             }
             if auto, !Task.isCancelled {
                 do {
                     try await Cleaner.flushRAM()
                     await MainActor.run {
                         self.ramFlushed = true
-                        self.ramNote = "RAM cache flushed — your apps kept running."
+                        self.ramNote = "RAM cache flushed."
                     }
                 } catch {
                     await MainActor.run {
-                        self.ramNote = "RAM flush skipped (\(error.localizedDescription)). Apps kept running."
+                        self.ramNote = "RAM flush skipped (\(error.localizedDescription))."
                     }
                 }
             }
@@ -256,6 +247,33 @@ final class ScanViewModel {
                     self.phase = .cleaned
                 }
             }
+        }
+    }
+
+    /// Applies per-item clean results to the model. MainActor only.
+    /// Deleted items leave the list; failed items stay, carrying the error,
+    /// so the user can retry exactly what broke.
+    private func apply(results: [UUID: Cleaner.ItemOutcome]) {
+        guard !results.isEmpty else { return }
+        for category in categories {
+            var survivors: [JunkItem] = []
+            for item in category.items {
+                guard let result = results[item.id] else {
+                    survivors.append(item)
+                    continue
+                }
+                switch result {
+                case .deleted:
+                    // Removed from the list — it is gone.
+                    continue
+                case .failed(let message), .skipped(let message):
+                    item.isDeleted = false
+                    item.error = message
+                    item.isSelected = false
+                    survivors.append(item)
+                }
+            }
+            category.items = survivors
         }
     }
 

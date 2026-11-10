@@ -33,23 +33,84 @@ enum Scanner {
         hasFDA: Bool,
         includeDownloads: Bool = false,
         isCancelled: @escaping @Sendable () -> Bool = { false }
-    ) async -> [JunkCategory] {
-        await withTaskGroup(of: (CategoryKind, [JunkItem]).self) { group in
+    ) async -> [(kind: CategoryKind, items: [ScannedItem])] {
+        // Fresh index per scan: sizes must reflect the disk now, and the
+        // ownership ledger must start empty so the totals are per-scan.
+        PathIndex.shared.reset()
+
+        let scanned = await withTaskGroup(of: (CategoryKind, [ScannedItem]).self) { group in
             for kind in CategoryKind.allCases {
                 group.addTask(priority: .userInitiated) {
                     let items = await scan(kind: kind, hasFDA: hasFDA, includeDownloads: includeDownloads, isCancelled: isCancelled)
                     return (kind, items)
                 }
             }
-            var map: [CategoryKind: [JunkItem]] = [:]
+            var map: [CategoryKind: [ScannedItem]] = [:]
             for await (kind, items) in group {
                 map[kind] = items
             }
-            return CategoryKind.allCases.map { JunkCategory(kind: $0, items: map[$0] ?? []) }
+            return CategoryKind.allCases.map { (kind: $0, items: map[$0] ?? []) }
         }
+
+        return reconcile(scanned)
     }
 
-    static func scan(kind: CategoryKind, hasFDA: Bool, includeDownloads: Bool = false) async -> [JunkItem] {
+    /// Reconciles overlapping categories so the same bytes are never counted
+    /// twice (see `PERFORMANCE_AUDIT.md` A4).
+    ///
+    /// `~/Library/Caches/Homebrew` is found by both App Caches (as a child of
+    /// `Library/Caches`) and Packages (as an explicit path). `~/.docker` is
+    /// found by both Docker and Docker Build. Each duplicate was a full
+    /// recursive walk *and* was added to the app total, so the UI
+    /// over-reported what was reclaimable.
+    ///
+    /// The first category to claim a path keeps the bytes; the later one is
+    /// marked "already counted in <category>" and contributes 0 to the total
+    /// while still being visible and still cleanable.
+    private static func reconcile(
+        _ scanned: [(kind: CategoryKind, items: [ScannedItem])]
+    ) -> [(kind: CategoryKind, items: [ScannedItem])] {
+        // Deterministic order so the same category always wins.
+        let order = CategoryKind.allCases
+        var claimed: [String: CategoryKind] = [:]
+        var result: [(kind: CategoryKind, items: [ScannedItem])] = []
+
+        for kind in order {
+            guard let entry = scanned.first(where: { $0.kind == kind }) else {
+                result.append((kind: kind, items: []))
+                continue
+            }
+            var rebuilt: [ScannedItem] = []
+            for item in entry.items {
+                guard let url = item.url else {
+                    rebuilt.append(item)
+                    continue
+                }
+                let path = url.standardizedFileURL.path
+                if let owner = claimed[path] {
+                    // Same bytes, already in the total under another category.
+                    // Rebuild the row: `size` and `detail` are immutable.
+                    rebuilt.append(ScannedItem(
+                        id: item.id,
+                        name: item.name,
+                        url: item.url,
+                        snapshotID: item.snapshotID,
+                        size: 0,
+                        safety: item.safety,
+                        detail: "Already counted in \(owner.rawValue)",
+                        cleanAction: item.cleanAction
+                    ))
+                    continue
+                }
+                claimed[path] = kind
+                rebuilt.append(item)
+            }
+            result.append((kind: kind, items: rebuilt))
+        }
+        return result
+    }
+
+    static func scan(kind: CategoryKind, hasFDA: Bool, includeDownloads: Bool = false) async -> [ScannedItem] {
         await scan(kind: kind, hasFDA: hasFDA, includeDownloads: includeDownloads, isCancelled: { Task.isCancelled })
     }
 
@@ -57,28 +118,28 @@ enum Scanner {
     /// Okay) items. Skips Docker VM traversal, tmutil snapshots, iOS backups,
     /// and Downloads — the expensive + Risky-only work — so a background run
     /// stays cheap. Docker builder is included only when the watchdog opts in.
-    static func scanWatchdog(config: WatchdogConfig, hasFDA: Bool) async -> [JunkCategory] {
+    static func scanWatchdog(config: WatchdogConfig, hasFDA: Bool) async -> [(kind: CategoryKind, items: [ScannedItem])] {
         let kinds: [CategoryKind] = [
             .appCaches, .logsAndReports, .xcode, .packageManagers, .trash,
         ] + (config.includeOkay ? [.orphaned] : [])
           + (config.includeDockerBuilderCache ? [.dockerBuild] : [])
-        return await withTaskGroup(of: (CategoryKind, [JunkItem]).self) { group in
+        return await withTaskGroup(of: (CategoryKind, [ScannedItem]).self) { group in
             for kind in kinds {
                 group.addTask(priority: .userInitiated) {
                     let items = await scan(kind: kind, hasFDA: hasFDA, includeDownloads: false, isCancelled: { Task.isCancelled })
                     return (kind, items)
                 }
             }
-            var map: [CategoryKind: [JunkItem]] = [:]
+            var map: [CategoryKind: [ScannedItem]] = [:]
             for await (kind, items) in group {
                 if Task.isCancelled { break }
                 map[kind] = items
             }
-            return kinds.map { JunkCategory(kind: $0, items: map[$0] ?? []) }
+            return kinds.map { (kind: $0, items: map[$0] ?? []) }
         }
     }
 
-    private static func scan(kind: CategoryKind, hasFDA: Bool, includeDownloads: Bool, isCancelled: @escaping @Sendable () -> Bool) async -> [JunkItem] {
+    private static func scan(kind: CategoryKind, hasFDA: Bool, includeDownloads: Bool, isCancelled: @escaping @Sendable () -> Bool) async -> [ScannedItem] {
         switch kind {
         case .appCaches:
             return await scanAppCaches()
@@ -104,22 +165,22 @@ enum Scanner {
     }
 
     /// Enumerates immediate children of `relativePath` as items.
-    private static func scanChildren(at relativePath: String, safety: Safety) async -> [JunkItem] {
+    private static func scanChildren(at relativePath: String, safety: Safety) async -> [ScannedItem] {
         let base = home.appendingPathComponent(relativePath)
         let children = await DiskSize.childrenSizes(of: base)
         return children.map {
-            JunkItem(name: $0.name, url: $0.url, size: $0.size, safety: safety)
+            ScannedItem(name: $0.name, url: $0.url, size: $0.size, safety: safety)
         }
     }
 
-    private static func scanAppCaches() async -> [JunkItem] {
+    private static func scanAppCaches() async -> [ScannedItem] {
         let base = home.appendingPathComponent("Library/Caches")
         let children = await DiskSize.childrenSizes(of: base)
         return children.map { child in
             let safety = cacheSafety(child.name)
             // Browsers: spell out exactly what Risky costs so nobody deletes a profile by accident.
             let detail = safety == .risky ? "Deleting wipes the whole profile — history, logins, session, personal data." : nil
-            return JunkItem(name: child.name, url: child.url, size: child.size, safety: safety, detail: detail)
+            return ScannedItem(name: child.name, url: child.url, size: child.size, safety: safety, detail: detail)
         }
     }
 
@@ -131,15 +192,15 @@ enum Scanner {
         return riskyMarkers.contains { lower.contains($0) } ? .risky : .safe
     }
 
-    private static func scanLogs() async -> [JunkItem] {
-        var items: [JunkItem] = []
+    private static func scanLogs() async -> [ScannedItem] {
+        var items: [ScannedItem] = []
         for rel in ["Library/Logs", "Library/Logs/DiagnosticReports"] {
             let base = home.appendingPathComponent(rel)
             let children = await DiskSize.childrenSizes(of: base)
             for child in children {
                 // Prefix with parent so duplicates across roots stay distinct.
                 let parent = base.deletingLastPathComponent().lastPathComponent
-                items.append(JunkItem(
+                items.append(ScannedItem(
                     name: parent == "Logs" ? child.name : "DiagnosticReports/\(child.name)",
                     url: child.url, size: child.size, safety: .safe
                 ))
@@ -148,36 +209,36 @@ enum Scanner {
         return items.sorted { $0.size > $1.size }
     }
 
-    private static func scanXcode(isCancelled: @escaping @Sendable () -> Bool) async -> [JunkItem] {
-        var items: [JunkItem] = []
+    private static func scanXcode(isCancelled: @escaping @Sendable () -> Bool) async -> [ScannedItem] {
+        var items: [ScannedItem] = []
         let dev = home.appendingPathComponent("Library/Developer")
 
         // DerivedData — each project folder, safe (rebuildable).
         let derived = dev.appendingPathComponent("Xcode/DerivedData")
         for child in await DiskSize.childrenSizes(of: derived) {
-            items.append(JunkItem(name: "DerivedData/\(child.name)", url: child.url, size: child.size, safety: .safe))
+            items.append(ScannedItem(name: "DerivedData/\(child.name)", url: child.url, size: child.size, safety: .safe))
         }
         // Archives — okay (App Store symbols live here).
         let archives = dev.appendingPathComponent("Xcode/Archives")
         for child in await DiskSize.childrenSizes(of: archives) {
-            items.append(JunkItem(name: "Archives/\(child.name)", url: child.url, size: child.size, safety: .okay, detail: "Symbols for App Store builds"))
+            items.append(ScannedItem(name: "Archives/\(child.name)", url: child.url, size: child.size, safety: .okay, detail: "Symbols for App Store builds"))
         }
         // iOS DeviceSupport — safe (re-downloaded on next build).
         let support = dev.appendingPathComponent("Xcode/iOS DeviceSupport")
         for child in await DiskSize.childrenSizes(of: support) {
-            items.append(JunkItem(name: "DeviceSupport/\(child.name)", url: child.url, size: child.size, safety: .safe))
+            items.append(ScannedItem(name: "DeviceSupport/\(child.name)", url: child.url, size: child.size, safety: .safe))
         }
         // Simulators — okay (device data).
         let sims = dev.appendingPathComponent("CoreSimulator/Devices")
         for child in await DiskSize.childrenSizes(of: sims) {
             if isCancelled() { break }
-            items.append(JunkItem(name: "Simulator/\(child.name)", url: child.url, size: child.size, safety: .okay, detail: "Simulator data"))
+            items.append(ScannedItem(name: "Simulator/\(child.name)", url: child.url, size: child.size, safety: .okay, detail: "Simulator data"))
         }
         return items.sorted { $0.size > $1.size }
     }
 
-    private static func scanPackageManagers() async -> [JunkItem] {
-        var items: [JunkItem] = []
+    private static func scanPackageManagers() async -> [ScannedItem] {
+        var items: [ScannedItem] = []
         let candidates: [(relative: String, label: String, safety: Safety)] = [
             ("Library/Caches/Homebrew", "Homebrew", .safe),
             (".npm/_cacache", "npm", .safe),
@@ -196,18 +257,36 @@ enum Scanner {
             (".m2/repository", "Maven", .safe),
             ("Library/pnpm/store", "pnpm store", .safe),
         ]
-        for candidate in candidates {
-            let url = home.appendingPathComponent(candidate.relative)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            let size = await DiskSize.allocatedSize(of: url)
-            items.append(JunkItem(name: candidate.label, url: url, size: size, safety: candidate.safety, detail: candidate.relative))
+        // All candidates measured concurrently — 16 sequential tree walks were
+        // the bulk of this category's cost.
+        let measured = await withTaskGroup(of: (String, URL, Int64, Safety, String).self) { group in
+            for candidate in candidates {
+                group.addTask(priority: .userInitiated) {
+                    let url = home.appendingPathComponent(candidate.relative)
+                    var isDir: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+                        return ("", url, 0, candidate.safety, candidate.relative)
+                    }
+                    let size = PathIndex.shared.measure(path: url.path).size
+                    return (candidate.label, url, size, candidate.safety, candidate.relative)
+                }
+            }
+            var collected: [(String, URL, Int64, Safety, String)] = []
+            for await result in group {
+                if !result.0.isEmpty {
+                    collected.append(result)
+                }
+            }
+            return collected
+        }
+        for (label, url, size, safety, detail) in measured {
+            items.append(ScannedItem(name: label, url: url, size: size, safety: safety, detail: detail))
         }
         // Homebrew: also consult `brew --cache` when available (allocated scan still authoritative).
         if let brewCache = homebrewCachePath() {
             if !items.contains(where: { $0.url?.path == brewCache.path }) {
-                let size = await DiskSize.allocatedSize(of: brewCache)
-                items.append(JunkItem(name: "Homebrew (brew cache)", url: brewCache, size: size, safety: .safe, detail: brewCache.path))
+                let size = PathIndex.shared.measure(path: brewCache.path).size
+                items.append(ScannedItem(name: "Homebrew (brew cache)", url: brewCache, size: size, safety: .safe, detail: brewCache.path))
             }
         }
         // Dev project builds: .node_modules, .build, target/, Electron/Tauri outputs.
@@ -219,7 +298,12 @@ enum Scanner {
     /// Finds rebuildable project folders and badges them Okay (costs a
     /// rebuild, never user data). Generic `build`/`dist`/`out` require a
     /// project marker in the parent — otherwise they could be source.
-    private static func scanDevBuilds() async -> [JunkItem] {
+    /// Debug/test entry point for the dev-build walk.
+    static func scanDevBuildsPublic() async -> [ScannedItem] {
+        await scanDevBuilds()
+    }
+
+    private static func scanDevBuilds() async -> [ScannedItem] {
         // dir name -> (safety, rebuild hint). __pycache__ regenerates instantly.
         let targets: [String: (Safety, String)] = [
             "node_modules": (.okay, "npm install to rebuild"),
@@ -250,37 +334,59 @@ enum Scanner {
         let fm = FileManager.default
         let roots: [URL] = ["Developer", "workspace", "projects", "work", "Code", "dev"].map { home.appendingPathComponent($0) }
             .filter { fm.fileExists(atPath: $0.path) }
-        var found: [JunkItem] = []
+        var found: [ScannedItem] = []
+        // Index cursor instead of `queue.removeFirst()`: popping the front of an
+        // Array is O(n), and this walk visits up to 5 000 directories.
         var queue: [(URL, Int)] = roots.map { ($0, 0) }
+        var cursor = 0
         var visited = 0
-        while !queue.isEmpty {
+        // Hits are collected first, then measured concurrently — measuring
+        // each hit inside the BFS serialised the expensive part.
+        var hits: [(URL, Safety, String)] = []
+
+        while cursor < queue.count {
             if Task.isCancelled { break }
-            let (dir, depth) = queue.removeFirst()
+            let (dir, depth) = queue[cursor]
+            cursor += 1
             guard visited < 5000, depth <= 6 else { continue }
             visited += 1
-            guard let children = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
-            for name in children {
+            // `readdir` gives the name and the type in one pass — no extra
+            // `fileExists` stat per child.
+            for entry in FastSize.children(ofPath: dir.path) {
                 if Task.isCancelled { break }
+                let name = entry.name
                 if skip.contains(name) { continue }
+                guard entry.isDirectory else { continue }
                 let url = dir.appendingPathComponent(name)
-                var isDir: ObjCBool = false
-                guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
                 if let (safety, hint) = targets[name] {
-                    let size = await DiskSize.allocatedSize(of: url)
-                    let rel = String(url.path.dropFirst(home.path.count + 1))
-                    found.append(JunkItem(name: rel, url: url, size: size, safety: safety, detail: hint))
+                    hits.append((url, safety, hint))
                     continue // don't descend into found artifacts
                 }
                 if generic.contains(name) {
                     if projectHasMarker(in: dir, markers: markers) {
-                        let size = await DiskSize.allocatedSize(of: url)
-                        let rel = String(url.path.dropFirst(home.path.count + 1))
-                        found.append(JunkItem(name: rel, url: url, size: size, safety: .okay, detail: "Rebuild with the project's build command"))
+                        hits.append((url, .okay, "Rebuild with the project's build command"))
                     }
                     continue
                 }
                 queue.append((url, depth + 1))
             }
+        }
+
+        let measured = await withTaskGroup(of: (URL, Int64, Safety, String).self) { group in
+            for (url, safety, hint) in hits {
+                group.addTask(priority: .userInitiated) {
+                    (url, PathIndex.shared.measure(path: url.path).size, safety, hint)
+                }
+            }
+            var collected: [(URL, Int64, Safety, String)] = []
+            for await result in group {
+                collected.append(result)
+            }
+            return collected
+        }
+        for (url, size, safety, hint) in measured {
+            let rel = String(url.path.dropFirst(home.path.count + 1))
+            found.append(ScannedItem(name: rel, url: url, size: size, safety: safety, detail: hint))
         }
         return found.sorted { $0.size > $1.size }.prefix(100).map { $0 }
     }
@@ -291,8 +397,10 @@ enum Scanner {
             return true
         }
         // *.xcodeproj / *.xcworkspace in the parent also mark a real project.
-        if let children = try? fm.contentsOfDirectory(atPath: dir.path) {
-            for name in children where name.hasSuffix(".xcodeproj") || name.hasSuffix(".xcworkspace") {
+        // `readdir` instead of `contentsOfDirectory`: this runs once per
+        // generic build folder found, and it only needs the names.
+        for entry in FastSize.children(ofPath: dir.path) {
+            if entry.name.hasSuffix(".xcodeproj") || entry.name.hasSuffix(".xcworkspace") {
                 return true
             }
         }
@@ -322,25 +430,25 @@ enum Scanner {
         }
     }
 
-    private static func scanDownloadsMailBackups(hasFDA: Bool, includeDownloads: Bool) async -> [JunkItem] {
-        var items: [JunkItem] = []
+    private static func scanDownloadsMailBackups(hasFDA: Bool, includeDownloads: Bool) async -> [ScannedItem] {
+        var items: [ScannedItem] = []
         // Downloads — opt-in only, so the launch scan never triggers a TCC prompt.
         if includeDownloads {
             let downloads = home.appendingPathComponent("Downloads")
             for child in await DiskSize.childrenSizes(of: downloads) {
-                items.append(JunkItem(name: child.name, url: child.url, size: child.size, safety: .risky, detail: "Downloads — personal files"))
+                items.append(ScannedItem(name: child.name, url: child.url, size: child.size, safety: .risky, detail: "Downloads — personal files"))
             }
         }
         // iOS device backups — risky (personal data).
         let backups = home.appendingPathComponent("Library/Application Support/MobileSync/Backup")
         for child in await DiskSize.childrenSizes(of: backups) {
-            items.append(JunkItem(name: "iOS Backup/\(child.name)", url: child.url, size: child.size, safety: .risky, detail: "Device backup"))
+            items.append(ScannedItem(name: "iOS Backup/\(child.name)", url: child.url, size: child.size, safety: .risky, detail: "Device backup"))
         }
         // Mail attachments — risky (personal mail), FDA-gated.
         if hasFDA {
             let mail = home.appendingPathComponent("Library/Mail")
             for child in await DiskSize.childrenSizes(of: mail) {
-                items.append(JunkItem(name: "Mail/\(child.name)", url: child.url, size: child.size, safety: .risky, detail: "Mail"))
+                items.append(ScannedItem(name: "Mail/\(child.name)", url: child.url, size: child.size, safety: .risky, detail: "Mail"))
             }
         }
         return items.sorted { $0.size > $1.size }
@@ -348,23 +456,23 @@ enum Scanner {
 
     /// Docker file + VM disk layout lives in DockerScanner — kept here as a
     /// thin shim so historical call sites stay stable.
-    static func scanDocker() async -> [JunkItem] {
+    static func scanDocker() async -> [ScannedItem] {
         await DockerScanner.scanDockerData()
     }
 
-    static func scanDockerBuild() async -> [JunkItem] {
+    static func scanDockerBuild() async -> [ScannedItem] {
         await DockerScanner.scanDockerBuild()
     }
 
-    private static func scanSnapshots() async -> [JunkItem] {
+    private static func scanSnapshots() async -> [ScannedItem] {
         let ids = await listLocalSnapshots()
-        var items: [JunkItem] = []
+        var items: [ScannedItem] = []
         for id in ids {
             // Snapshot size isn't reported on an item line; count as 0 until
             // `tmutil listlocalsnapshots` gives no bytes — report honest 0,
             // detail explains. Sizes for snapshots are measured by APFS
             // thining after deletion (Cleaner reports actual freed).
-            items.append(JunkItem(
+            items.append(ScannedItem(
                 name: snapshotLabel(id),
                 url: nil, snapshotID: id,
                 size: 0, safety: .risky,
@@ -409,16 +517,19 @@ enum Scanner {
         return id
     }
 
-    private static func scanOrphaned(isCancelled: @escaping @Sendable () -> Bool) async -> [JunkItem] {
+    private static func scanOrphaned(isCancelled: @escaping @Sendable () -> Bool) async -> [ScannedItem] {
         let installed = installedBundleIDs()
-        var items: [JunkItem] = []
+        var items: [ScannedItem] = []
 
         let support = home.appendingPathComponent("Library/Application Support")
-        for child in await DiskSize.childrenSizes(of: support) {
+        // Filter before measuring: 180 children, only the orphaned ones are
+        // worth walking.
+        let supportChildren = await DiskSize.childrenSizes(of: support) { name in
+            looksLikeBundleID(name) && !installed.contains(name)
+        }
+        for child in supportChildren {
             if isCancelled() { break }
-            guard looksLikeBundleID(child.name) else { continue }
-            if installed.contains(child.name) { continue }
-            items.append(JunkItem(
+            items.append(ScannedItem(
                 name: child.name, url: child.url, size: child.size,
                 safety: .okay, detail: "Application Support"
             ))
@@ -426,13 +537,29 @@ enum Scanner {
 
         let prefs = home.appendingPathComponent("Library/Preferences")
         if let names = try? FileManager.default.contentsOfDirectory(atPath: prefs.path) {
-            for name in names where name.hasSuffix(".plist") {
+            // Filter before measuring, then measure concurrently.
+            let candidates = names.filter { name in
+                guard name.hasSuffix(".plist") else { return false }
+                let id = String(name.dropLast(".plist".count))
+                return looksLikeBundleID(id) && !installed.contains(id)
+            }
+            let measured = await withTaskGroup(of: (String, URL, Int64).self) { group in
+                for name in candidates {
+                    group.addTask(priority: .userInitiated) {
+                        let url = prefs.appendingPathComponent(name)
+                        return (name, url, PathIndex.shared.measure(path: url.path).size)
+                    }
+                }
+                var collected: [(String, URL, Int64)] = []
+                for await result in group {
+                    collected.append(result)
+                }
+                return collected
+            }
+            for (name, url, size) in measured {
                 if isCancelled() { break }
                 let id = String(name.dropLast(".plist".count))
-                guard looksLikeBundleID(id), !installed.contains(id) else { continue }
-                let url = prefs.appendingPathComponent(name)
-                let size = await DiskSize.allocatedSize(of: url)
-                items.append(JunkItem(
+                items.append(ScannedItem(
                     name: id, url: url, size: size,
                     safety: .okay, detail: "Preferences"
                 ))
@@ -446,22 +573,28 @@ enum Scanner {
     }
 
     /// Bundle IDs of apps in /Applications — read-only, never touched.
+    /// The Info.plist reads are independent, so they run concurrently.
     static func installedBundleIDs() -> Set<String> {
-        var ids = Set<String>()
         let appsDir = URL(fileURLWithPath: "/Applications")
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: appsDir.path) else { return ids }
-        for name in names where name.hasSuffix(".app") {
-            let infoURL = appsDir.appendingPathComponent(name).appendingPathComponent("Contents/Info.plist")
-            if let plist = NSDictionary(contentsOf: infoURL), let id = plist["CFBundleIdentifier"] as? String {
-                ids.insert(id)
-            }
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: appsDir.path) else { return [] }
+        let apps = names.filter { $0.hasSuffix(".app") }
+        var ids = Set<String>()
+        let lock = NSLock()
+        // Concurrent plist reads: 40 apps, each an independent file read.
+        DispatchQueue.concurrentPerform(iterations: apps.count) { index in
+            let infoURL = appsDir.appendingPathComponent(apps[index]).appendingPathComponent("Contents/Info.plist")
+            guard let plist = NSDictionary(contentsOf: infoURL),
+                  let id = plist["CFBundleIdentifier"] as? String else { return }
+            lock.lock()
+            ids.insert(id)
+            lock.unlock()
         }
         return ids
     }
 }
 
-extension JunkItem {
-    static func snapshotPlaceholder(id: String) -> JunkItem {
-        JunkItem(name: id, url: nil, snapshotID: id, size: 0, safety: .risky, detail: id)
+extension ScannedItem {
+    static func snapshotPlaceholder(id: String) -> ScannedItem {
+        ScannedItem(name: id, url: nil, snapshotID: id, size: 0, safety: .risky, detail: id)
     }
 }

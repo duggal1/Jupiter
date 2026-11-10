@@ -304,26 +304,18 @@ enum MemoryLab {
         }.value
     }
 
-    /// Stage 2 — purge the file page cache with the system dialog. This is
-    /// the same primitive `Cleaner.flushRAM` uses, housed here so the ladder
-    /// owns before/after measurement. Throws if the user cancels.
-    static func purgeCache() async throws {
-        try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            // osascript prompts once for admin via the system dialog.
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", "do shell script \"/usr/sbin/purge\" with administrator privileges"]
-            let err = Pipe()
-            process.standardError = err
-            process.standardOutput = Pipe()
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                let data = err.fileHandleForReading.readDataToEndOfFile()
-                let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "purge failed"
-                throw NSError(domain: "jupiter.MemoryLab", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
-            }
-        }.value
+    /// Stage 2 — purge the file page cache. This is the same primitive
+    /// `Cleaner.flushRAM` uses, housed here so the ladder owns before/after
+    /// measurement.
+    ///
+    /// The privileged call goes through `PrivilegedRunner`, which uses an
+    /// existing `sudo` ticket when there is one and only shows the password
+    /// sheet when it must. Previously every purge raised a fresh prompt.
+    ///
+    /// `allowPrompt` is `false` for background runs: a launchd job has no
+    /// window server session, so a dialog would hang the job.
+    static func purgeCache(allowPrompt: Bool = true) async throws {
+        try await PrivilegedRunner.run(tool: "/usr/sbin/purge", allowPrompt: allowPrompt)
     }
 
     // MARK: - Formatting
