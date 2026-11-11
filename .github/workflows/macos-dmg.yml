@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
     paths:
       - ".github/workflows/macos-dmg.yml"
+      - "Purge/**"
+      - "Purge.xcodeproj/**"
+      - "Tests/**"
   workflow_dispatch:
 
 permissions:
@@ -27,6 +30,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO 'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO clean build
           APP="$RUNNER_TEMP/JupiterDerived/Build/Products/Release/Jupiter.app"
           test -f "$APP/Contents/MacOS/Jupiter"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "1.1.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")" = "2"
           lipo "$APP/Contents/MacOS/Jupiter" -verify_arch arm64 x86_64
           codesign --force --deep --sign - --timestamp=none "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
@@ -44,20 +49,20 @@ jobs:
           path: release/Jupiter.dmg
           if-no-files-found: error
 
-      - name: Publish initial release
+      - name: Publish Jupiter v1.1.0
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view v1.0.0 > /dev/null 2>&1; then
-            echo "Release v1.0.0 already exists; leaving it unchanged."
+          if gh release view v1.1.0 > /dev/null 2>&1; then
+            echo "Release v1.1.0 already exists; leaving it unchanged."
           else
-            gh release create v1.0.0 release/Jupiter.dmg \
+            gh release create v1.1.0 release/Jupiter.dmg \
               --target "$GITHUB_SHA" \
-              --title "Jupiter v1.0.0" \
-              --notes "First public macOS release. Universal Apple Silicon and Intel app. Ad-hoc signed, not notarized."
+              --title "Jupiter v1.1.0" \
+              --notes "Updated native macOS cleaner with faster and more accurate scans, improved cleanup state synchronization, memory tools, background monitoring, and privileged operation handling. Universal Apple Silicon and Intel DMG. Ad-hoc signed, not notarized. On first launch, right-click the app and choose Open."
           fi
 
       - name: Publish tagged release
